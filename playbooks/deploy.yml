@@ -1,0 +1,74 @@
+---
+- name: Provision EC2 instance for Spring Boot lab
+  hosts: localhost
+  gather_facts: false
+  vars:
+    instance_name: ansible-lab-instance
+    instance_type: t3.micro
+    key_pair: "{{ lookup('env', 'KEY_PAIR_NAME') }}"
+    ssh_key_path: "{{ lookup('env', 'SSH_KEY_PATH') }}"
+    sg_id: "{{ lookup('env', 'LAB_SG_ID') }}"
+    lab_tag: "{{ lookup('env', 'LAB_TAG') }}"
+    region: "{{ lookup('env', 'AWS_DEFAULT_REGION') }}"
+    al2023_ssm_param: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  tasks:
+    - name: Resolve latest Amazon Linux 2023 AMI id via SSM public parameter
+      ansible.builtin.command:
+        cmd: >-
+          aws ssm get-parameter --name {{ al2023_ssm_param }}
+          --region {{ region }} --query Parameter.Value --output text
+      register: ami_lookup
+      changed_when: false
+
+    - name: Set AMI id fact
+      ansible.builtin.set_fact:
+        al2023_ami_id: "{{ ami_lookup.stdout | trim }}"
+
+    - name: Launch EC2 instance
+      amazon.aws.ec2_instance:
+        name: "{{ instance_name }}"
+        key_name: "{{ key_pair }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ al2023_ami_id }}"
+        security_groups:
+          - "{{ sg_id }}"
+        network:
+          assign_public_ip: true
+        tags:
+          workshop: "{{ lab_tag }}"
+          Name: "{{ instance_name }}"
+        wait: true
+        state: running
+      register: ec2
+
+    - name: Capture public IP fact
+      ansible.builtin.set_fact:
+        instance_public_ip: "{{ ec2.instances[0].public_ip_address }}"
+
+    - name: Wait for SSH to become reachable
+      ansible.builtin.wait_for:
+        host: "{{ instance_public_ip }}"
+        port: 22
+        timeout: 180
+        state: started
+
+    - name: Add instance to in-memory inventory group
+      ansible.builtin.add_host:
+        hostname: "{{ instance_public_ip }}"
+        groups: app_servers
+        ansible_user: ec2-user
+        ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+    - name: Print connection info
+      ansible.builtin.debug:
+        msg: "EC2 ready at {{ instance_public_ip }} — proceeding to deploy"
+
+- name: Deploy Spring Boot application on EC2
+  hosts: app_servers
+  become: true
+  gather_facts: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - springboot

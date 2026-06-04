@@ -1,0 +1,36 @@
+---
+- name: Provision lab security group
+  hosts: localhost
+  gather_facts: false
+  vars:
+    sg_name: ansible-lab-sg
+    sg_description: Security group for ansible-aws lab (SSH restricted, HTTP 8080 open to all)
+    my_ip: "{{ lookup('env', 'MY_IP') }}"
+    lab_tag: "{{ lookup('env', 'LAB_TAG') }}"
+  tasks:
+    - name: Ensure security group exists with required ingress rules
+      amazon.aws.ec2_security_group:
+        name: "{{ sg_name }}"
+        description: "{{ sg_description }}"
+        rules:
+          - proto: tcp
+            ports: 22
+            cidr_ip: "{{ my_ip }}"
+            rule_desc: SSH from control node (RESTRICTED)
+          - proto: tcp
+            ports: 8080
+            cidr_ip: 0.0.0.0/0
+            rule_desc: Spring Boot HTTP from anywhere (FOR PROFESSOR)
+        rules_egress:
+          - proto: -1
+            cidr_ip: 0.0.0.0/0
+            rule_desc: Allow all outbound
+        tags:
+          workshop: "{{ lab_tag }}"
+          Name: "{{ sg_name }}"
+        state: present
+      register: sg_result
+
+    - name: Print security group id
+      ansible.builtin.debug:
+        msg: "Security Group ID: {{ sg_result.group_id }}"

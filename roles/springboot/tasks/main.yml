@@ -1,0 +1,127 @@
+---
+# Spring Boot petclinic richiede Java 17+; usiamo Corretto 21 (LTS, supportato da AWS).
+- name: Install Java 21, Git and Maven
+  ansible.builtin.dnf:
+    name:
+      - java-21-amazon-corretto-headless
+      - git
+      - maven
+    state: present
+    update_cache: true
+
+# Utente dedicato — buona pratica per non eseguire l'app come root.
+- name: Ensure service user exists
+  ansible.builtin.user:
+    name: "{{ springboot_user }}"
+    system: true
+    shell: /sbin/nologin
+    create_home: true
+    home: "/home/{{ springboot_user }}"
+    state: present
+
+- name: Ensure install directory exists
+  ansible.builtin.file:
+    path: "{{ springboot_install_dir }}"
+    state: directory
+    owner: "{{ springboot_user }}"
+    group: "{{ springboot_user }}"
+    mode: "0755"
+
+# Clone idempotente: la task non riclona se HEAD è già su springboot_repo_version.
+- name: Clone Spring Boot application repository
+  ansible.builtin.git:
+    repo: "{{ springboot_repo_url }}"
+    dest: "{{ springboot_install_dir }}"
+    version: "{{ springboot_repo_version }}"
+    force: true
+  become_user: "{{ springboot_user }}"
+  register: git_clone
+
+# Maven wrapper se presente nel repo, altrimenti mvn di sistema.
+# -DskipTests perché in lab non vogliamo allungare il tempo di build.
+- name: Detect maven wrapper presence
+  ansible.builtin.stat:
+    path: "{{ springboot_install_dir }}/mvnw"
+  register: mvnw_stat
+
+- name: Build application JAR
+  ansible.builtin.command:
+    cmd: "{{ (mvnw_stat.stat.exists | bool) | ternary('./mvnw', 'mvn') }} -B -DskipTests package"
+    chdir: "{{ springboot_install_dir }}"
+  become_user: "{{ springboot_user }}"
+  environment:
+    HOME: "/home/{{ springboot_user }}"
+    MAVEN_OPTS: -Xmx512m
+  register: mvn_build
+  # Idempotenza: la build è "changed" solo se il clone Git ha aggiornato i sorgenti.
+  # Senza questa condizione, ogni run di playbook segnalerebbe la build come "changed".
+  changed_when: git_clone.changed
+
+# Cerchiamo il fat JAR generato. Escludiamo sources/javadoc/original per
+# evitare di selezionare artefatti non eseguibili.
+- name: Locate produced fat JAR
+  ansible.builtin.find:
+    paths: "{{ springboot_install_dir }}/target"
+    patterns: "*.jar"
+    excludes:
+      - "*-sources.jar"
+      - "*-javadoc.jar"
+      - "original-*.jar"
+  register: jar_files
+
+- name: Fail if no JAR was produced
+  ansible.builtin.fail:
+    msg: "Maven build did not produce a runnable JAR in target/"
+  when: jar_files.matched == 0
+
+- name: Resolve JAR path fact
+  ansible.builtin.set_fact:
+    springboot_jar_path: "{{ (jar_files.files | sort(attribute='path') | last).path }}"
+
+# Service unit systemd — gestisce restart on failure e log via journald.
+# notify -> handler "reload systemd": daemon-reload solo se il file è effettivamente
+# cambiato. Non duplichiamo l'azione con un task esplicito.
+- name: Install systemd unit for Spring Boot service
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ springboot_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Spring Boot application ({{ springboot_service_name }})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User={{ springboot_user }}
+      WorkingDirectory={{ springboot_install_dir }}
+      ExecStart=/usr/bin/java -jar {{ springboot_jar_path }} --server.port={{ springboot_port }}
+      Restart=on-failure
+      RestartSec=5
+      SuccessExitStatus=143
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: reload systemd
+
+# Flush degli handler PRIMA di start: garantisce che `daemon_reload` avvenga
+# (se notificato) prima che systemd provi a leggere la unit. Senza meta:flush_handlers
+# gli handler verrebbero eseguiti solo a fine play, dopo lo `Start service`.
+- name: Flush handlers so systemd is reloaded before service start
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Spring Boot service
+  ansible.builtin.systemd:
+    name: "{{ springboot_service_name }}"
+    enabled: true
+    state: started
+
+# Attendiamo che la porta sia in LISTEN prima di considerare il deploy completo.
+- name: Wait for application port to accept connections
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ springboot_port }}"
+    timeout: 180
+    state: started

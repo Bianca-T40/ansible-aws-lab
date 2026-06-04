@@ -1,0 +1,17 @@
+---
+# URL del repository Spring Boot da deployare.
+# spring-petclinic è una demo app ufficiale Spring, builda con Maven, espone porta 8080.
+springboot_repo_url: https://github.com/spring-projects/spring-petclinic.git
+springboot_repo_version: main
+
+# Path locale sull'host EC2 dove clonare il sorgente.
+springboot_install_dir: /opt/springboot-app
+
+# Nome del servizio systemd.
+springboot_service_name: springboot-app
+
+# Utente di sistema che possiede i file ed esegue il servizio.
+springboot_user: springboot
+
+# Porta esposta dall'applicazione. Spring Boot di default usa 8080.
+springboot_port: 8080
