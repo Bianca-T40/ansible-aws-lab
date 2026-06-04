@@ -1,5 +1,5 @@
 ---
-- name: Provision EC2 instance for Spring Boot lab
+- name: Provision EC2 instances for Spring Boot lab
   hosts: localhost
   gather_facts: false
   vars:
@@ -24,7 +24,7 @@
       ansible.builtin.set_fact:
         al2023_ami_id: "{{ ami_lookup.stdout | trim }}"
 
-    - name: Launch EC2 instance
+    - name: Launch EC2 instances
       amazon.aws.ec2_instance:
         name: "{{ instance_name }}"
         key_name: "{{ key_pair }}"
@@ -36,35 +36,39 @@
           assign_public_ip: true
         tags:
           workshop: "{{ lab_tag }}"
-          Name: "{{ instance_name }}"
+        exact_count: 2
+        filters:
+          "tag:Name": "{{ instance_name }}"
+          instance-state-name: [running, pending]
         wait: true
         state: running
       register: ec2
 
-    - name: Capture public IP fact
-      ansible.builtin.set_fact:
-        instance_public_ip: "{{ ec2.instances[0].public_ip_address }}"
-
-    - name: Wait for SSH to become reachable
+    - name: Wait for SSH to become reachable on all instances
       ansible.builtin.wait_for:
-        host: "{{ instance_public_ip }}"
+        host: "{{ item.public_ip_address }}"
         port: 22
         timeout: 180
         state: started
+      loop: "{{ ec2.instances }}"
 
-    - name: Add instance to in-memory inventory group
+    - name: Add all instances to in-memory inventory group
       ansible.builtin.add_host:
-        hostname: "{{ instance_public_ip }}"
+        hostname: "{{ item.public_ip_address }}"
         groups: app_servers
         ansible_user: ec2-user
         ansible_ssh_private_key_file: "{{ ssh_key_path }}"
         ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        # Forziamo l'interprete corretto direttamente qui per evitare ambiguità
+        ansible_python_interpreter: /usr/bin/python3
+      loop: "{{ ec2.instances }}"
 
-    - name: Print connection info
+    - name: Print connection info for deployed instances
       ansible.builtin.debug:
-        msg: "EC2 ready at {{ instance_public_ip }} — proceeding to deploy"
+        msg: "EC2 instance ready at {{ item.public_ip_address }}"
+      loop: "{{ ec2.instances }}"
 
-- name: Deploy Spring Boot application on EC2
+- name: Deploy Spring Boot application on EC2 cluster
   hosts: app_servers
   become: true
   gather_facts: true
